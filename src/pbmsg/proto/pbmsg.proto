@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+import "google/protobuf/any.proto";
+
+message MsgBase{
+	string server = 1;
+	string method = 2;		
+	string channel = 3;	
+	string code = 4;	
+	string session = 5; 
+	int32 error = 10;
+	uint64 index = 11;
+	uint64 tstamp = 12;
+	google.protobuf.Any data = 100;
+}

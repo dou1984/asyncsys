@@ -8,9 +8,4 @@ namespace ashan
 	{
 		m_index = idx++;
 	}
-	thdid &thdid::instance()
-	{
-		static thread_local thdid _ins;
-		return _ins;
-	}
 }

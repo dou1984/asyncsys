@@ -6,6 +6,7 @@
 #define __INVALID_H__
 
 #define INVALID (-1)
+#define TIMEOUT (-2)
 
 template <class _CLS>
 bool valid(const _CLS &cls)

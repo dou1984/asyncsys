@@ -7,3 +7,14 @@ message Request {
 message Response {
 	string response = 1;
 }
+
+message Select {
+	int64 id = 1;
+}
+
+message UpdateUserInfo {
+	int64 id = 1;
+	string userid = 2;
+	string mobile = 3;
+	string password = 4;
+}

@@ -4,28 +4,20 @@
 #include <memory>
 #include <chrono>
 #include <atomic>
-#include <signal.h>
-#include "asyncsys.h"
-#include "msg.h"
-#include "asyncnet.h"
-#include "client.h"
-#include "log.h"
-#include "mysqlcli.h"
-#include "rediscli.h"
-#include "connectpool.h"
-#include "session.h"
-#include "object.h"
-#include "httpserver.h"
-#include "httpreponse.h"
-#include "msgserver.h"
-#include "msgsession.h"
-#include "atime.h"
-#include "rpc.h"
+#include "asys.h"
+#include "rpctest.h"
+#include "wstest.h"
+#include "jsontest.h"
+
+#define CHECK_MSG(_MSG, _BUF, _SIZE)         \
+	ashan::MSG *_MSG = (ashan::MSG *)(_BUF); \
+	if ((int)_MSG->message_size() > _SIZE)   \
+		return 0;
 
 using a3cli = ashan::client;
-using my_results = const ashan::mysqlcli::my_results;
+using sql_results = const ashan::mysqlcli::sql_results;
 using rds_results = const ashan::rediscli::rds_results;
-using rpc_results = const ashan::msgsession::rpc_results;
+using msg_results = const ashan::msgsession::msg_results;
 using sess = ashan::session;
 using MSG = ashan::MSG;
 
@@ -39,23 +31,23 @@ auto cli_dispatch = [](auto c, auto buf, auto size) -> int
 	}
 	return _msg->message_size();
 };
-auto msg_dispatch = [](std::shared_ptr<ashan::client> cli, const char *buf, int size) -> int
+auto msg_dispatch = [](ashan::client *cli, const char *buf, int size) -> int
 {
 	CHECK_MSG(_msg, buf, size);
 	LOG_DBG("size:%d recv:%d %d", size, _msg->cmd, _msg->len);
 	if (_msg->cmd == 0)
 	{
-		std::string id(_msg->data, _msg->len);
-		auto s = sess::pool::get(id);
+		std::string id(_msg->data(), _msg->size());
+		auto s = sess::get_pool().get(id);
 		if (s == nullptr)
 		{
 			s = sess::make();
-			sess::pool::insert(id, s);
+			sess::get_pool().insert(id, s);
 		}
 
-		s->set_client(cli->shared_from_this());
+		s->set_client(cli);
 
-		cli->dispatch = [=](auto c, auto buf, auto size)
+		cli->dispatch = [=](auto c, auto buf, auto size) -> int
 		{
 			CHECK_MSG(_msg, buf, size);
 			if (_msg->cmd == 1)
@@ -85,7 +77,7 @@ auto msg_srv = [](ashan::asyncnet *_net, int fd)
 	auto cli = a3cli::make(fd)->init();
 	cli->dispatch = msg_dispatch;
 };
-auto com_dispatch = [](std::shared_ptr<ashan::client> cli, const char *buf, int size) -> int
+auto com_dispatch = [](ashan::client *cli, const char *buf, int size) -> int
 {
 	cli->send(buf, size);
 	return 0;
@@ -122,52 +114,11 @@ int test_timer()
 	ashan::asyncnet::get().wait();
 	return 0;
 }
-auto g_sql()
-{
-	static auto _cli = ashan::mysqlcli::make("127.0.0.1:3306");
-	return _cli;
-}
-int test_mysql()
-{
 
-	g_sql()->query("select * from t_userinfo;", [](auto r)
-				   { LOG_DBG("%s %s %s", r->rows[0], r->rows[1], r->rows[2]); });
-	g_sql()->query("select * from t_userinfo;", [](auto r)
-				   { LOG_DBG("%s %s %s", r->rows[0], r->rows[1], r->rows[2]); });
-	g_sql()->query("update t_userinfo set `mobile`='133333' where `id`=1;", [](auto r)
-				   { LOG_DBG("%d %s", r->last_error, r->last_msg); });
-	g_sql()->query("insert into t_userinfo (`userid`,`password`,`mobile`) values ('abccc','fffff','000000');",
-				   [](auto r)
-				   {
-					   LOG_DBG("%d %s", r->last_error, r->last_msg);
-				   });
-	g_sql()->query("select from t_userinfo;", [](auto r)
-				   { LOG_DBG("%d %s", r->last_error, r->last_msg); });
-	ashan::asyncnet::get().wait();
-	return 0;
-}
-void tquery(my_results *r)
-{
-	if (r->last_error == 0)
-	{
-		auto rows = r->rows;
-		if (rows)
-		{
-			LOG_DBG("%s %s %s", rows[0], rows[1], rows[2]);
-		}
-		g_sql()->query("select * from t_userinfo;", tquery);
-	}
-}
-int test_mysqlstop()
-{
-	g_sql()->query("select * from t_userinfo;", tquery);
-	ashan::asyncnet::get().wait();
-	return 0;
-}
 auto g_rds()
 {
 	static ashan::connectpool<ashan::rediscli> rds_pool("127.0.0.1:6379");
-	return rds_pool.get();
+	return rds_pool.obj();
 }
 int test_redis()
 {
@@ -181,7 +132,7 @@ int test_redis()
 		}
 		else
 		{
-			LOG_DBG("%s => %s", r->query.c_str(), r->last_error);
+			LOG_DBG("%s => %s", r->query.c_str(), r->strerror());
 		}
 	};
 	auto f2 = [](rds_results *r)
@@ -197,7 +148,7 @@ int test_redis()
 		}
 		else
 		{
-			LOG_DBG("%s => %s", r->query.c_str(), r->last_error);
+			LOG_DBG("%s => %s", r->query.c_str(), r->strerror());
 		}
 	};
 	cli->query("getxx aaaa", f);
@@ -248,7 +199,7 @@ void test_repeathash()
 void test_httpserver()
 {
 	auto srv = ashan::httpserver::make(":8080");
-	srv->set(
+	srv->add_method(
 		"/echo",
 		[](auto s, auto &req)
 		{
@@ -269,31 +220,64 @@ void test_httpserver()
 		});
 	ashan::asyncnet::get().wait();
 }
-void ignore_signal(int __signal)
+
+auto g_sql()
 {
-	struct sigaction sa;
-	sa.sa_handler = SIG_IGN;
-	sa.sa_flags = 0;
-	if (sigemptyset(&sa.sa_mask) == -1 || sigaction(__signal, &sa, 0) == -1)
+	static auto _cli = ashan::mysqlcli::make("127.0.0.1:3306");
+	return _cli;
+}
+int test_mysql()
+{
+
+	g_sql()->query("select * from t_userinfo;", [](auto r)
+				   { LOG_DBG("%s %s %s", r->rows[0], r->rows[1], r->rows[2]); });
+	g_sql()->query("select * from t_userinfo;", [](auto r)
+				   { LOG_DBG("%s %s %s", r->rows[0], r->rows[1], r->rows[2]); });
+	g_sql()->query("update t_userinfo set `mobile`='133333' where `id`=1;", [](auto r)
+				   { LOG_DBG("%d %s", r->last_error, r->last_msg); });
+	g_sql()->query("insert into t_userinfo (`userid`,`password`,`mobile`) values ('abccc','fffff','000000');",
+				   [](auto r)
+				   {
+					   LOG_DBG("%d %s", r->last_error, r->last_msg);
+				   });
+	g_sql()->query("select from t_userinfo;", [](auto r)
+				   { LOG_DBG("%d %s", r->last_error, r->last_msg); });
+	ashan::asyncnet::get().wait();
+	return 0;
+}
+
+void tquery(sql_results *r)
+{
+	if (r->last_error == 0)
 	{
-		perror("failed to ignore SIGPIPE; sigaction");
-		exit(EXIT_FAILURE);
+		auto rows = r->rows;
+		if (rows)
+		{
+			LOG_DBG("%s %s %s", rows[0], rows[1], rows[2]);
+		}
+		g_sql()->query("select * from t_userinfo;", tquery);
 	}
 }
 
-auto pool = ashan::connectpool<ashan::msgsession>::make("127.0.0.1:9000");
-void test_rpccb(rpc_results *r)
+int test_mysqlstop()
+{
+	g_sql()->query("select * from t_userinfo;", tquery);
+	ashan::asyncnet::get().wait();
+	return 0;
+}
+auto pool = ashan::connectpool<ashan::rpccli>::make("127.0.0.1:9000");
+void test_rpccb(msg_results *r)
 {
 	if (r->last_error == INVALID)
 	{
 		LOG_ERR("%d", r->last_error);
-		r->cli->query(MSG::make(1, "helloworld", 10), test_rpccb);
+		r->client->query(MSG::make(1, "helloworld", 10), test_rpccb);
 	}
 	else
 	{
 		LOG_DBG("recv %s", r->data);
 		{
-			auto rpccli = pool->get();
+			auto rpccli = pool->obj();
 			rpccli->query(MSG::make(1, "helloworld", 10), test_rpccb);
 		}
 	}
@@ -307,7 +291,7 @@ void test_rpccli()
 			[]()
 			{
 				{
-					auto rpccli = pool->get();
+					auto rpccli = pool->obj();
 					rpccli->query(MSG::make(1, "helloworld", 10), test_rpccb);
 				}
 				ashan::asyncnet::get().wait();
@@ -319,7 +303,9 @@ void test_rpccli()
 }
 void test_rpcsrv()
 {
-	auto srv = ashan::msgserver::make("127.0.0.1:9000");
+	auto srv = ashan::msgserver<int>::make("127.0.0.1:9000");
+	srv->dispatch = ashan::mydispatch<MSG>::server;
+
 	srv->add_method(
 		1,
 		[](auto s, auto buf, auto size)
@@ -330,11 +316,82 @@ void test_rpcsrv()
 
 	ashan::asyncnet::get().wait();
 }
+struct vec
+{
+	int x;
+	int y;
+	int z;
+};
 
+int test_event()
+{
+	ashan::myevent<vec>::onevent(
+		"echo",
+		[](auto t)
+		{
+			std::cout << t->x << t->y << t->z << std::endl;
+		});
+	ashan::myevent<vec>::emit(
+		"echo",
+		{
+			.x = 1,
+			.y = 2,
+			.z = 3,
+		});
+
+	ashan::asyncnet::get().wait();
+	return 0;
+}
+int test_kafka_consume()
+{
+	auto c = ashan::kafkaconsume::make("broker");
+
+	std::thread t(
+		[=]()
+		{
+			c->pull(
+				"echo",
+				[](auto r)
+				{
+					if (r->last_msg == nullptr)
+					{
+					}
+				});
+		});
+	t.join();
+
+	return 0;
+}
+int test_kafka_produce()
+{
+	auto c = ashan::kafkaproduce::make("broker");
+	c->push("echo", "helloworld");
+	return 0;
+}
+int test_regex()
+{
+	using namespace ashan;
+	mysys::get().splite(
+		"lobby@0.0.0.0:9090;:9099", ";",
+		[](auto &s)
+		{
+			std::string name = "gateway";
+			std::string ip = "0.0.0.0";
+			std::string port = "0";
+			if (mysys::get().regex_search(R"((\w+)@(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+))", s, name, ip, port) || mysys::get().regex_search(R"((\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+))", s, ip, port) || mysys::get().regex_search(R"(:(\d+))", s, port))
+			{
+				LOG_DBG("%s %s %s %s", s.c_str(), name.c_str(), ip.c_str(), port.c_str());
+			}
+		});
+
+	return 0;
+}
 int main(int argc, char **argv)
 {
-	ignore_signal(SIGPIPE);
-	set_log_level(e_log_level_error);
+	ashan::mysys::get().ignore_signal();
+
+	// set_log_level(e_log_level_error);
+	set_log_level(e_log_level_core);
 
 	ashan::asyncsys sys;
 	if (strcmp(argv[1], "server") == 0)
@@ -407,6 +464,38 @@ int main(int argc, char **argv)
 	else if (strcmp(argv[1], "rpccc") == 0)
 	{
 		test_rpccc();
+	}
+	else if (strcmp(argv[1], "event") == 0)
+	{
+		test_event();
+	}
+	else if (strcmp(argv[1], "kafkac") == 0)
+	{
+		test_kafka_consume();
+	}
+	else if (strcmp(argv[1], "kafkap") == 0)
+	{
+		test_kafka_produce();
+	}
+	else if (strcmp(argv[1], "ws") == 0)
+	{
+		test_ws();
+	}
+	else if (strcmp(argv[1], "wssrv") == 0)
+	{
+		test_wssrv();
+	}
+	else if (strcmp(argv[1], "wscli") == 0)
+	{
+		test_wscli();
+	}
+	else if (strcmp(argv[1], "json") == 0)
+	{
+		test_json();
+	}
+	else
+	{
+		test_regex();
 	}
 	return 0;
 }
